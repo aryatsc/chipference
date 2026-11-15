@@ -52,6 +52,8 @@
   .derived select { font-size:11px; padding:1px 3px; }
   .chip-actions { display:flex; gap:12px; margin-top:8px; }
 
+  .modelline { margin:0 0 10px 56px; font-size:12px; color:var(--muted); }
+  .modelline b { color:var(--fg); font-weight:600; margin-right:4px; }
   .legend { display:flex; flex-wrap:wrap; gap:4px 16px; margin:0 0 4px 56px; font-size:12px; }
   .legend span { display:inline-flex; align-items:center; gap:6px; }
   .legend i { width:14px; height:2px; display:inline-block; }
@@ -72,7 +74,7 @@
   details.assume td { padding:2px 12px 2px 0; vertical-align:top; }
   details.assume td:first-child { white-space:nowrap; }
   .table-wrap { overflow-x:auto; }
-  @media (max-width: 820px) { .app { flex-direction:column; } aside { width:auto; max-height:none; border-right:none; border-bottom:1px solid var(--line); } main { padding:16px; } .legend { margin-left:0; } }
+  @media (max-width: 820px) { .modelline { margin-left:0; } .app { flex-direction:column; } aside { width:auto; max-height:none; border-right:none; border-bottom:1px solid var(--line); } main { padding:16px; } .legend { margin-left:0; } }
 </style>
 </head>
 <body>
@@ -119,6 +121,7 @@
 </aside>
 
 <main>
+  <div class="modelline" id="modelline"></div>
   <div class="legend" id="legend"></div>
   <svg id="plot" class="plot"></svg>
   <div class="table-wrap"><table class="read" id="read"></table></div>
@@ -254,8 +257,16 @@ function renderControls() {
 }
 function freeze(c, res) { const r = res[state.chips.indexOf(c)]; for (const [k] of SPEC_FIELDS) c[k] = r[k]; delete c.extrapolate; }
 
+function updateWorkLine() {
+  const k = n => n >= 1024 && n % 1024 === 0 ? n / 1024 + 'k' : n.toLocaleString();
+  const w = document.getElementById('modelwork'); if (w) w.textContent = `${k(state.isl)} in / ${k(state.osl)} out`;
+}
+
 function renderAssumptions() {
   const A = Model.ASSUME, MD = Model.MODEL;
+  document.getElementById('modelline').innerHTML = `<b>${MD.name}</b> ${(MD.totalParams / 1e12).toFixed(2)}T params, dense · ${MD.layers} layers · d ${MD.d.toLocaleString()} · ` +
+    `GQA ${MD.nHeads} query / ${MD.nKvHeads} KV heads · SwiGLU FFN ${MD.ffn.toLocaleString()} · NVFP4 weights, FP8 KV cache · ` +
+    `<span id="modelwork"></span>`;
   const rows = [
     ['Model', `MegaLlama-3T: ${(MD.totalParams / 1e12).toFixed(2)}T params, ${MD.layers} layers, d=${MD.d}, ${MD.nHeads} query / ${MD.nKvHeads} KV heads × ${MD.headDim}, SwiGLU FFN ${MD.ffn}, vocab ${MD.vocab}`],
     ['Precision', `NVFP4 weights and GEMMs (${A.weightBytes} B/param incl. scales), FP8 KV cache and attention, BF16 activations`],
@@ -274,6 +285,7 @@ function renderAssumptions() {
 
 function changed(hard, rerender) {
   saveState();
+  updateWorkLine();
   if (hard) cache = null;
   if (rerender) renderControls();
   draw();
@@ -630,6 +642,7 @@ if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEven
 
 renderControls();
 renderAssumptions();
+updateWorkLine();
 draw();
 </script>
 </body>
