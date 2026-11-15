@@ -4,10 +4,6 @@
 
 A roofline model of LLM decode on GB300 NVL72, Vera Rubin NVL72, and a hypothetical next chip (LebronChip). For each chip it searches parallelism configs and plots the throughput–latency Pareto frontier.
 
-![demo](media/demo.gif)
-
-([MP4](media/demo.mp4))
-
 ## What's modeled
 
 **Model: MegaLlama-3T.** The Llama-3 architecture scaled up to about 3.05T parameters, dense:
@@ -79,7 +75,11 @@ MoE and expert parallelism, speculative decoding, prefill/decode interference (i
 
 ## Video
 
-`media/demo.mp4` is a recording of the real page. [`tools/record.py`](tools/record.py) opens [`tools/frame.html`](tools/frame.html), which puts the page in a browser-window frame and clicks the real controls. It then steps the page's animation clock one frame at a time, screenshots each frame with headless Chrome, and encodes the result with ffmpeg. To re-render after changing anything, run `python3 tools/record.py` (needs Google Chrome and ffmpeg).
+The demo video is a recording of the real page. [`tools/record.py`](tools/record.py) opens [`tools/frame.html`](tools/frame.html), which puts the page in a browser-window frame and clicks the real controls. It then steps the page's animation clock one frame at a time, screenshots each frame with headless Chrome, and encodes the result with ffmpeg into `media/` (not checked in). To re-render after changing anything, run `python3 tools/record.py` (needs Google Chrome and ffmpeg).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
 
 ## Run locally
 
