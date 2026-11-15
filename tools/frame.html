@@ -40,11 +40,12 @@
 // Scripted demo, driven frame by frame by tools/record.py via window.__frame(seconds).
 // Each step moves the cursor to a real control in the live page and clicks it at time t.
 const STEPS = [
-  { t: 1.4, sel: '#chips .chip:nth-child(1) [data-act=vis]' },     // show LebronChip
-  { t: 3.6, sel: '#xmode button[data-v=interactivity]' },          // same-interactivity view
-  { t: 5.8, sel: '#sol' },                                          // speed of light
+  { t: 1.5, sel: '#ymetric button[data-v=perKW]' },               // tok/s per GPU → per kW
+  { t: 3.6, sel: '#chips .chip:nth-child(1) [data-act=vis]' },     // show LebronChip
+  { t: 5.7, sel: '#xmode button[data-v=interactivity]' },          // same-interactivity view
+  { t: 7.8, sel: '#sol' },                                          // speed of light
 ];
-const MOVE = 0.75, ANIM_MS = 950;
+const MOVE = 0.75, ANIM_MS = 1000;
 const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 let app, doc, api, start = { x: 900, y: 400 }, done = 0;
 
@@ -53,12 +54,11 @@ function target(sel) {
   return { x: f.left + r.left + r.width / 2, y: f.top + r.top + r.height / 2 };
 }
 
-// Put the page in the opening state without animating: concurrency X, per-kW Y, LebronChip hidden.
+// Put the page in the opening state without animating: concurrency X, per-GPU Y, LebronChip hidden.
 function setup() {
   api.setClock(-1e6);
   api.setDuration(ANIM_MS);
   doc.querySelector('#xmode button[data-v=concurrency]').click();
-  doc.querySelector('#ymetric button[data-v=perKW]').click();
   doc.querySelector('#chips .chip:nth-child(1) [data-act=vis]').click();
   api.setClock(-5e5);
   // resolve cursor waypoints now that the panel is laid out (the chip row is rebuilt on click,

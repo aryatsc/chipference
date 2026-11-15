@@ -52,17 +52,18 @@ Link latencies are in both lines: they're physics, not software. The *Speed of l
 
 ## Chip specs (per GPU package)
 
-| | Dense FP4 | Dense FP8 | HBM | HBM BW | NVLink (bidir) | NVLink domain | NIC | All-in W/GPU |
-|---|---|---|---|---|---|---|---|---|
-| GB300 NVL72 | 15 PF | 5 PF | 288 GB | 8 TB/s | 1.8 TB/s | 72 | 800 Gb/s | ~1,900 |
-| Vera Rubin NVL72 | 35 PF | 17.5 PF | 288 GB | 19.2 TB/s | 3.0 TB/s | 72 | 1.6 Tb/s | ~2,640 |
-| LebronChip | Rubin × (Rubin ÷ GB300) for every spec, NVLink domain unchanged | | | | | | | |
+| | Dense FP4 | Dense FP8 | HBM | HBM BW | NVLink (bidir) | NVLink domain | NIC | GPU W | Non-GPU W/GPU |
+|---|---|---|---|---|---|---|---|---|---|
+| GB300 NVL72 | 15 PF | 5 PF | 288 GB | 8 TB/s | 1.8 TB/s | 72 | 800 Gb/s | 1,400 | ~500 |
+| Vera Rubin NVL72 | 35 PF | 17.5 PF | 288 GB | 19.2 TB/s | 3.0 TB/s | 72 | 1.6 Tb/s | 1,800 | ~840 |
+| LebronChip | Rubin × (Rubin ÷ GB300) for every spec, including GPU power; NVLink domain and non-GPU power stay at Rubin's | | | | | | | | |
 
 Sources and caveats:
 - **NVIDIA product pages** for GB300 NVL72 and Vera Rubin NVL72, as of Nov 2026.
 - **Rubin revision:** Rubin's HBM4 and NVLink figures are the revised ones from Oct 2026 (19.2 TB/s, 3.0 TB/s).
 - **Rubin FP4:** uses the dense 35 PF figure. The 50 PF "inference" number relies on adaptive compression.
-- **Power:** rack power ÷ 72. That's about 137 kW for GB300 NVL72 (OEM figures) and about 190 kW for VR NVL72 Max-Q (SemiAnalysis / Kuo estimates). Neither figure is official.
+- **Power:** GPU power is the rated TGP (1.4 kW GB300; 1.8 kW Rubin Max-Q). Non-GPU power per GPU is rack power ÷ 72 minus GPU power, using about 137 kW for GB300 NVL72 (OEM figures) and about 190 kW for VR NVL72 Max-Q (SemiAnalysis / Kuo estimates). Neither rack figure is official.
+- **Power under load:** non-GPU power is always drawn. A GPU draws 20% of its rating while waiting on collectives and kernel syncs, and full power while moving data or computing. Prefill GPUs run flat out. Throughput per kW is output tokens per second per kW of this average draw.
 
 Every spec is editable in the page, and you can add your own chips. The full state is kept in the URL, so any view can be shared as a link.
 

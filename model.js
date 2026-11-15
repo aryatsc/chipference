@@ -45,6 +45,7 @@
     nvlP2pUs: 2.0,        // one point-to-point send over NVLink
     netP2pUs: 5.0,        // one GPU-to-GPU send over the scale-out network (rough; no public CX-8 figure)
     hbmUsable: 0.92,      // fraction of HBM capacity usable for weights + KV
+    gpuIdle: 0.20,        // GPU draw while waiting (leakage, HBM refresh, clocks) as a share of its rated power
     ppOptions: [1, 2, 3, 4, 6, 8],
   };
 
@@ -184,14 +185,25 @@
   // Point for a given config and batch.
   function point(chip, P, B, work, prefillCS) {
     const { tpot, br } = decodeStep(P, B);
+    const A = P.A;
     const decodeThr = B / (tpot * P.chips);            // output tok/s per decode chip
-    let thr = decodeThr;
-    if (work.includePrefill) thr = work.osl / (work.osl / decodeThr + prefillCS);
+    // Power tracks utilization: the static share is always drawn; the rest only while the GPU is
+    // moving data or computing, not while it waits on collectives, sends or kernel sync.
+    const busy = (br.weights + br.kv + br.compute) / tpot;
+    // Non-GPU overhead (CPUs, NICs, switches, cooling share) is always drawn; the GPU draws its idle
+    // share always and the rest only while busy.
+    const allIn = chip.gpuW + chip.otherW;
+    const decodeW = chip.otherW + chip.gpuW * (A.gpuIdle + (1 - A.gpuIdle) * busy);
+    // Per request: OSL tokens of decode GPU-time plus the prefill GPU-time (prefill GPUs run flat out).
+    const decodeGpuS = work.osl / decodeThr, prefillGpuS = work.includePrefill ? prefillCS : 0;
+    const thr = work.osl / (decodeGpuS + prefillGpuS);
+    const joules = decodeGpuS * decodeW + prefillGpuS * allIn;
     return {
       interactivity: 1 / tpot,
       usersPerChip: B / P.chips,
       thr,
-      thrPerKW: thr / (chip.watts / 1000),
+      thrPerKW: work.osl / joules * 1000,               // output tok/s per kW of average draw
+      busy, decodeW,
       tpot, br, B, cfg: P.cfg, chips: P.chips, ppOverNet: P.ppOverNet,
     };
   }

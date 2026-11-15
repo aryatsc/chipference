@@ -142,7 +142,8 @@ const SPEC_FIELDS = [
   ['nvlTBs', 'NVLink bidir (TB/s)'],
   ['domain', 'NVLink domain (GPUs)'],
   ['nicGbps', 'Scale-out NIC (Gb/s)'],
-  ['watts', 'All-in W / GPU'],
+  ['gpuW', 'GPU power (W)'],
+  ['otherW', 'Non-GPU W / GPU'],
 ];
 
 const DEFAULT_CHIPS = [
@@ -150,9 +151,9 @@ const DEFAULT_CHIPS = [
   // Power = rack power / GPUs (GB300 NVL72 ~137 kW, OEMs; VR NVL72 ~190 kW Max-Q, SemiAnalysis/Kuo).
   // Listed newest first, so legend, chip list and table read top-down in the same order as the curves.
   { id:'lebron', name:'LebronChip', color:'#7b2fbe', visible:true, extrapolate:{ from:'gb300', to:'rubin' },
-    fp4:0, fp8:0, hbmGB:0, hbmTBs:0, nvlTBs:0, domain:72, nicGbps:0, watts:0 },
-  { id:'rubin', name:'Vera Rubin NVL72', color:'#1c7ed6', visible:true, fp4:35, fp8:17.5, hbmGB:288, hbmTBs:19.2, nvlTBs:3.0, domain:72, nicGbps:1600, watts:2640 },
-  { id:'gb300', name:'GB300 NVL72', color:'#2f9e44', visible:true, fp4:15, fp8:5, hbmGB:288, hbmTBs:8, nvlTBs:1.8, domain:72, nicGbps:800, watts:1900 },
+    fp4:0, fp8:0, hbmGB:0, hbmTBs:0, nvlTBs:0, domain:72, nicGbps:0, gpuW:0, otherW:0 },
+  { id:'rubin', name:'Vera Rubin NVL72', color:'#1c7ed6', visible:true, fp4:35, fp8:17.5, hbmGB:288, hbmTBs:19.2, nvlTBs:3.0, domain:72, nicGbps:1600, gpuW:1800, otherW:840 },
+  { id:'gb300', name:'GB300 NVL72', color:'#2f9e44', visible:true, fp4:15, fp8:5, hbmGB:288, hbmTBs:8, nvlTBs:1.8, domain:72, nicGbps:800, gpuW:1400, otherW:500 },
 ];
 const PALETTE = ['#e8590c', '#c2255c', '#0c8599', '#5f3dc4', '#a07a00'];
 const SPLIT = [['weights', 'Weight reads', '#4c6ef5'], ['kv', 'KV reads', '#15aabf'], ['compute', 'Compute', '#fab005'], ['comm', 'Comms', '#fa5252'], ['overhead', 'Fixed overhead', '#adb5bd']];
@@ -169,12 +170,17 @@ const openChips = new Set();
 
 // ---------------------------------------------------------------- state / URL
 function loadState() {
-  try { const h = location.hash.slice(1); if (h) return Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(decodeURIComponent(atob(h)))); } catch (e) {}
+  try { const h = location.hash.slice(1); if (h) return migrate(Object.assign(structuredClone(DEFAULT_STATE), JSON.parse(decodeURIComponent(atob(h))))); } catch (e) {}
   return structuredClone(DEFAULT_STATE);
+}
+function migrate(s) {
+  for (const c of s.chips || []) if (c.watts != null && c.gpuW == null) { c.gpuW = Math.round(c.watts * 0.74); c.otherW = c.watts - c.gpuW; delete c.watts; }
+  return s;
 }
 function saveState() { try { history.replaceState(null, '', '#' + btoa(encodeURIComponent(JSON.stringify(state)))); } catch (e) {} }
 
-// Extrapolated chip: spec = to × (to / from), per field. NVLink domain kept as entered.
+// Extrapolated chip: spec = to × (to / from), per field. NVLink domain is kept as entered, and
+// non-GPU overhead stays at the newer chip's level instead of compounding.
 function resolvedChips() {
   const byId = Object.fromEntries(state.chips.map(c => [c.id, c]));
   return state.chips.map(c => {
@@ -182,7 +188,8 @@ function resolvedChips() {
     const a = byId[c.extrapolate.from], b = byId[c.extrapolate.to];
     if (!a || !b || a.extrapolate || b.extrapolate) return c;
     const r = Object.assign({}, c);
-    for (const [k] of SPEC_FIELDS) if (k !== 'domain') r[k] = +(b[k] * b[k] / a[k]).toPrecision(4);
+    for (const [k] of SPEC_FIELDS) if (k !== 'domain' && k !== 'otherW') r[k] = +(b[k] * b[k] / a[k]).toPrecision(4);
+    r.otherW = b.otherW;
     return r;
   });
 }
@@ -275,6 +282,7 @@ function renderAssumptions() {
     ['Latency', `${A.nvlCollectiveUs} µs per NVLink collective (2 per layer), ${A.nvlP2pUs} µs NVLink send, ${A.netP2pUs} µs scale-out send`],
     ['Decode', `time per token = sum over all layers; collectives on the critical path; PP keeps one microbatch per stage in flight`],
     ['Memory', `${pct(A.hbmUsable)} of HBM for weights + KV; KV reserved for full input + output length`],
+    ['Power', `per GPU = GPU power + its share of non-GPU power (CPUs, NICs, switches, cooling), from rack estimates. Non-GPU power is always drawn; the GPU draws ${pct(Model.ASSUME.gpuIdle)} of its rating while waiting on collectives and syncs, and full power while moving data or computing. Prefill GPUs run flat out. An extrapolated chip scales GPU power but keeps the newer chip's non-GPU power`],
     ['Prefill', `separate GPU pool, compute-bound at achievable FLOPs; its GPU-seconds are charged to each request`],
     ['Search', `every TP width dividing the NVLink domain, attention TP 1/2/4/8 (DP attention), PP 1–8; plotted line is the best config at each x`],
     ['Speed of light', `spec rates, no kernel sync cost, no padding; link latencies kept`],
@@ -301,7 +309,7 @@ for (const id of ['sol', 'prefill', 'pp', 'dpattn']) document.getElementById(id)
 for (const id of ['logy', 'gains']) document.getElementById(id).onchange = e => { state[id] = e.target.checked; changed(false); };
 document.getElementById('addchip').onclick = () => {
   const n = { id: newId(), name: 'Custom chip', color: PALETTE[state.chips.length % PALETTE.length], visible: true,
-    fp4: 15, fp8: 5, hbmGB: 288, hbmTBs: 8, nvlTBs: 1.8, domain: 72, nicGbps: 800, watts: 1900 };
+    fp4: 15, fp8: 5, hbmGB: 288, hbmTBs: 8, nvlTBs: 1.8, domain: 72, nicGbps: 800, gpuW: 1400, otherW: 500 };
   state.chips.push(n); openChips.add(n.id); changed(true, true);
 };
 document.getElementById('reset').onclick = () => { state = structuredClone(DEFAULT_STATE); pinnedX = null; openChips.clear(); changed(true, true); };
