@@ -16,12 +16,11 @@ A roofline model of LLM decode on GB300 NVL72, Vera Rubin NVL72, and a hypotheti
 - Fixed input and output lengths (default 8k in / 1k out).
 - Prefill runs on a separate GPU pool and is compute-bound. Its GPU-seconds are charged to each request, so throughput per GPU counts both pools.
 
-**Decode step:** each op costs `max(bytes / BW, FLOPs / peak)`, and time per output token is the sum over all ops in all layers. Per layer:
+**Decode step:** each op costs `max(bytes / BW, FLOPs / peak)`, plus a fixed sync cost per dependent kernel. Time per output token is the sum over all ops in all layers. Per layer:
 - QKV and output projections, run as weight-streaming GEMMs
 - attention over the KV cache
-- the SwiGLU FFN
+- the SwiGLU FFN (gate/up and down)
 - two collectives (after attention and after the FFN), which sit on the critical path
-- a fixed overhead
 
 Pipeline hops and the LM head are added on top.
 
@@ -33,25 +32,23 @@ Pipeline hops and the LM head are added on top.
 
 A config is valid only if weights plus KV for the full context fit in 92% of HBM. The plotted line is the best valid config at each point.
 
-**Achievable rates:** the same for every chip, and taken from public Blackwell measurements.
+**Achievable vs speed of light.** The solid line is what a best-in-class implementation can reach. There is no blanket "x% of peak" factor; the gap to speed of light comes from three physical effects, applied the same way to every chip:
 
-| Assumption | Value |
-|---|---|
-| HBM bandwidth | 85% of spec |
-| Dense tensor FLOPs | 65% of spec |
-| Link bandwidth | 90% of spec |
-| NVLink collective | 3 µs each |
-| NVLink send | 2 µs |
-| Scale-out send | 5 µs |
-| Fixed cost per layer | 1 µs |
-| Decode GEMM token padding | multiple of 16 |
+1. **Sustained rates.** HBM can't stream at its spec rate (refresh, bank and bus turnaround), and tensor cores can't hold boost clock at the power limit under sustained GEMM load.
+2. **Kernel sync.** Every dependent kernel pays a fixed launch, pipeline-fill and tail cost, even with CUDA graphs and programmatic dependent launch. Norms, RoPE and SiLU are assumed fused, leaving 5 kernels per layer.
+3. **MMA padding.** Decode GEMMs pad the token dimension to the tensor-core instruction's minimum width.
 
-The *Speed of light* toggle shows 100% of spec with no padding and no per-layer overhead; link latencies are kept.
+| Assumption | Achievable | Speed of light |
+|---|---|---|
+| Sustained HBM bandwidth | 90% of spec (B200 microbenchmarks: 82–90%) | 100% |
+| Sustained tensor clock | 80% of boost (estimate) | 100% |
+| NVLink bandwidth | 100% of spec (NVLink SHARP reaches it on NVL72) | 100% |
+| Sync per dependent kernel | 1 µs × 5 per layer | 0 |
+| Decode GEMM token padding | multiple of 16 | none |
+| NVLink collective latency | 3 µs each, 2 per layer | same |
+| NVLink / scale-out send | 2 µs / 5 µs | same |
 
-**Views:**
-- X axis: interactivity (output tok/s per user), or concurrent users per decode GPU on a reversed log scale, so low latency is on the right in both.
-- Y axis: output tok/s per GPU, or per kW of all-in power.
-- The "×" markers give each chip's throughput gain over the next chip down the list, at three points along the frontier.
+Link latencies are in both lines: they're physics, not software. The *Speed of light* toggle draws the dashed line. Calibrating these constants against a published measurement (e.g. a SemiAnalysis InferenceMAX Pareto on GB200) is a planned follow-up.
 
 ## Chip specs (per GPU package)
 

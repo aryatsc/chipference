@@ -270,14 +270,14 @@ function renderAssumptions() {
   const rows = [
     ['Model', `MegaLlama-3T: ${(MD.totalParams / 1e12).toFixed(2)}T params, ${MD.layers} layers, d=${MD.d}, ${MD.nHeads} query / ${MD.nKvHeads} KV heads × ${MD.headDim}, SwiGLU FFN ${MD.ffn}, vocab ${MD.vocab}`],
     ['Precision', `NVFP4 weights and GEMMs (${A.weightBytes} B/param incl. scales), FP8 KV cache and attention, BF16 activations`],
-    ['Achievable', `${pct(A.effHbm)} of HBM bandwidth, ${pct(A.effFlops)} of tensor FLOPs, ${pct(A.effLink)} of link bandwidth — same for every chip`],
-    ['Latency', `${A.nvlCollectiveUs} µs per NVLink collective (2 per layer), ${A.nvlP2pUs} µs NVLink send, ${A.netP2pUs} µs scale-out send, ${A.layerOverheadUs} µs fixed per layer`],
-    ['Kernels', `each op costs max(bytes ÷ BW, FLOPs ÷ peak); decode GEMM token dim padded to ${A.gemmTile}`],
+    ['Kernels', `each op costs max(bytes ÷ BW, FLOPs ÷ peak), plus ${A.kernelSyncUs} µs sync per dependent kernel (${A.kernelsPerLayer} per layer: QKV, attention, O, gate/up, down; norms/RoPE/SiLU fused); decode GEMM token dim padded to ${A.mmaPad}`],
+    ['Sustained rates', `HBM streams at ${pct(A.hbmSustained)} of spec (DRAM refresh and turnaround; measured 82–90% on B200); tensor cores at ${pct(A.clockSustained)} of boost clock under power-limited load (estimate); NVLink at ${pct(A.linkEff)} of spec (NVLS) — same for every chip`],
+    ['Latency', `${A.nvlCollectiveUs} µs per NVLink collective (2 per layer), ${A.nvlP2pUs} µs NVLink send, ${A.netP2pUs} µs scale-out send`],
     ['Decode', `time per token = sum over all layers; collectives on the critical path; PP keeps one microbatch per stage in flight`],
     ['Memory', `${pct(A.hbmUsable)} of HBM for weights + KV; KV reserved for full input + output length`],
     ['Prefill', `separate GPU pool, compute-bound at achievable FLOPs; its GPU-seconds are charged to each request`],
     ['Search', `every TP width dividing the NVLink domain, attention TP 1/2/4/8 (DP attention), PP 1–8; plotted line is the best config at each x`],
-    ['Speed of light', `100% of spec, no padding, no per-layer overhead; link latencies kept`],
+    ['Speed of light', `spec rates, no kernel sync cost, no padding; link latencies kept`],
   ];
   document.getElementById('assume').innerHTML = rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
   document.getElementById('keys').innerHTML = SPLIT.map(([, l, c]) => `<span><i style="background:${c}"></i>${l}</span>`).join('');

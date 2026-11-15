@@ -22,27 +22,34 @@
   MODEL.totalParams = MODEL.layers * (MODEL.attnParamsPerLayer + MODEL.ffnParamsPerLayer) + 2 * MODEL.embedParams;
 
   // ---------------------------------------------------------------------------
-  // Fixed assumptions. Same for every chip. Not user-tunable on purpose.
+  // Achievable: what a best-in-class implementation can reach. No blanket "x% of peak" factors;
+  // the gap to speed of light comes from three physical effects, the same for every chip:
+  //   1. sustained rates: HBM can't stream at its spec rate (refresh, bank and bus turnaround), and
+  //      tensor cores can't hold boost clock at the power limit under sustained GEMM load
+  //   2. a fixed sync cost per dependent kernel (launch, pipeline fill, tail), even with
+  //      CUDA graphs + programmatic dependent launch; norms, RoPE and activations are fused away
+  //   3. decode GEMMs pad the token dimension to the MMA instruction's minimum width
+  // Link latencies apply to both achievable and speed of light: they are physics, not software.
   // ---------------------------------------------------------------------------
   const ASSUME = {
     weightBytes: 0.5625,  // NVFP4: 4-bit values + one FP8 scale per 16 values = 4.5 bits
     kvBytes: 1,           // FP8 KV cache
     actBytes: 2,          // BF16 activations (GEMM inputs/outputs, collectives, PP sends)
-    gemmTile: 16,         // token dim of decode GEMMs is padded to a multiple of this (swap-AB kernels)
-    effHbm: 0.85,         // achievable fraction of spec HBM bandwidth (B200 streaming ~82%)
-    effFlops: 0.65,       // achievable fraction of spec dense tensor FLOPs (GB200 NVFP4 cuBLAS ~68%, GB300 ~50%)
-    effLink: 0.90,        // achievable fraction of spec link bandwidth (NVL72 all-reduce busbw ~100% with NVLS)
+    hbmSustained: 0.90,   // sustained / spec HBM bandwidth for large streams (B200 microbenchmarks: ~82-90%)
+    clockSustained: 0.80, // sustained / boost tensor clock under power-limited GEMM load (estimate)
+    linkEff: 1.0,         // NVLink SHARP all-reduce reaches ~100% of spec bus bandwidth on NVL72
+    kernelSyncUs: 1.0,    // fixed cost per dependent kernel (launch + fill + tail) with CUDA graphs + PDL
+    kernelsPerLayer: 5,   // QKV, attention, O proj, gate/up, down (norm, RoPE, SiLU fused)
+    mmaPad: 16,           // decode GEMM token dim padded to the MMA minimum (swap-AB kernels)
     nvlCollectiveUs: 3.0, // small-message all-reduce in NVLink domain (8xB200 nccl ~3 us, low-latency kernel ~2.4 us)
-    nvlP2pUs: 2.0,        // latency of one point-to-point send over NVLink
-    netP2pUs: 5.0,        // GPU-to-GPU send over scale-out network (rough; no public CX-8 figure)
-    layerOverheadUs: 1.0, // fixed per-layer cost (launch, sync, norms, rope) with fully fused kernels
+    nvlP2pUs: 2.0,        // one point-to-point send over NVLink
+    netP2pUs: 5.0,        // one GPU-to-GPU send over the scale-out network (rough; no public CX-8 figure)
     hbmUsable: 0.92,      // fraction of HBM capacity usable for weights + KV
     ppOptions: [1, 2, 3, 4, 6, 8],
   };
 
-  // Speed of light: 100% of spec, no tile padding, no per-layer overhead.
-  // Link latencies stay: they are physics, not software.
-  const SOL = Object.assign({}, ASSUME, { effHbm: 1, effFlops: 1, effLink: 1, gemmTile: 1, layerOverheadUs: 0 });
+  // Speed of light: spec rates, no kernel sync cost, no padding. Link latencies stay.
+  const SOL = Object.assign({}, ASSUME, { hbmSustained: 1, clockSustained: 1, linkEff: 1, kernelSyncUs: 0, mmaPad: 1 });
 
   const ceilTo = (x, q) => Math.ceil(x / q) * q;
 
@@ -82,11 +89,11 @@
     const ffnParams = M.ffnParamsPerLayer / t;
     const lmParams = M.embedParams / t;
 
-    const hbmBW = chip.hbmTBs * 1e12 * A.effHbm;
-    const fp4 = chip.fp4 * 1e15 * A.effFlops;
-    const fp8 = chip.fp8 * 1e15 * A.effFlops;
-    const nvlBW = chip.nvlTBs / 2 * 1e12 * A.effLink;     // spec is bidirectional; use one direction
-    const netBW = chip.nicGbps / 8 * 1e9 * A.effLink;
+    const hbmBW = chip.hbmTBs * 1e12 * A.hbmSustained;
+    const fp4 = chip.fp4 * 1e15 * A.clockSustained;
+    const fp8 = chip.fp8 * 1e15 * A.clockSustained;
+    const nvlBW = chip.nvlTBs / 2 * 1e12 * A.linkEff;     // spec is bidirectional; use one direction
+    const netBW = chip.nicGbps / 8 * 1e9 * A.linkEff;
 
     const ctxAvg = work.isl + work.osl / 2;
     const ctxMax = work.isl + work.osl;
@@ -120,8 +127,8 @@
     const { t, p } = P.cfg;
     const m = B / p;               // tokens per microbatch, per stage
     const mAttn = m / P.g;         // tokens per attention DP group
-    const mAttnPad = ceilTo(mAttn, A.gemmTile);
-    const mPad = ceilTo(m, A.gemmTile);
+    const mAttnPad = ceilTo(mAttn, A.mmaPad);
+    const mPad = ceilTo(m, A.mmaPad);
     const br = { weights: 0, kv: 0, compute: 0, comm: 0, overhead: 0 };
     const add = ([time, cb], memKey) => { br[cb ? 'compute' : memKey] += time; };
 
@@ -145,12 +152,13 @@
       const msg = m * M.d * A.actBytes;
       layer.comm += 2 * (A.nvlCollectiveUs * 1e-6 + 2 * (t - 1) / t * msg / P.nvlBW);
     }
-    layer.overhead += A.layerOverheadUs * 1e-6;
+    layer.overhead += A.kernelsPerLayer * A.kernelSyncUs * 1e-6;
 
     for (const k in br) br[k] += layer[k] * M.layers; // every token visits every layer once
 
     // LM head on the last stage
     add(op(P.lmParams * A.weightBytes + m * M.d * A.actBytes, 2 * mPad * P.lmParams, P.hbmBW, P.fp4), 'weights');
+    br.overhead += A.kernelSyncUs * 1e-6;
 
     // Pipeline hops: p sends per token step (incl. the sampled token back to stage 0)
     if (p > 1) {
@@ -170,7 +178,7 @@
     const M = MODEL;
     const linear = 2 * (M.totalParams - 2 * M.embedParams) * work.isl;
     const attn = 2 * M.layers * work.isl * work.isl * M.nHeads * M.headDim; // causal QK^T + PV
-    return linear / (chip.fp4 * 1e15 * A.effFlops) + attn / (chip.fp8 * 1e15 * A.effFlops);
+    return linear / (chip.fp4 * 1e15 * A.clockSustained) + attn / (chip.fp8 * 1e15 * A.clockSustained);
   }
 
   // Point for a given config and batch.
