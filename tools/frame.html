@@ -17,6 +17,8 @@
   .url svg { flex: none; }
   .url b { font-weight: 400; color: #80868b; }
   iframe { display: block; width: 1384px; height: 726px; border: 0; }
+  #cursor { display: none; } /* hidden in the video; add class "on" to show a pointer moving to each control */
+  #cursor.on { display: block; }
   #cursor { position: absolute; left: 0; top: 0; width: 22px; height: 22px; pointer-events: none; transform-origin: 3px 2px; z-index: 5; }
 </style>
 </head>
@@ -27,7 +29,7 @@
     <div class="nav">‹ ›</div>
     <div class="url">
       <svg width="11" height="13" viewBox="0 0 11 13"><rect x="1" y="5.5" width="9" height="7" rx="1.5" fill="#80868b"/><path d="M3 5.5V4a2.5 2.5 0 0 1 5 0v1.5" stroke="#80868b" stroke-width="1.4" fill="none"/></svg>
-      aryatsc.github.io<b>/chipference</b>
+      <span>aryatsc.github.io<b>/chipference/</b></span>
     </div>
   </div>
   <iframe id="app" src="../index.html"></iframe>
