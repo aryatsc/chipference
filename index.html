@@ -352,26 +352,26 @@ function path(pts, xs, ys) {
   return d;
 }
 
-function draw() {
+// ---------------------------------------------------------------- view model + animated paint
+// A "view" is everything needed to paint the chart: axes, curves in data coordinates, gain markers.
+// When the view changes, curves morph from the old view to the new one (resampled by arc length
+// and interpolated in screen space); axes tween when their type is unchanged and cross-fade otherwise.
+let ANIM_MS = 750;
+let lastView = null, anim = null, manualClock = null;
+const now = () => manualClock != null ? manualClock : performance.now();
+const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function buildView() {
   if (!cache) cache = compute();
   const { grid, series } = cache;
   const vis = series.filter(s => s.chip.visible);
   const conc = state.xmode === 'concurrency';
-  const xlab = conc ? 'Concurrent users per decode GPU (log, decreasing →)' : 'Interactivity (output tok/s per user)';
-  const ylab = state.ymetric === 'perKW' ? 'Output tok/s per kW (all-in power)' : 'Output tok/s per GPU';
-
-  document.getElementById('legend').innerHTML = vis.map(s => `<span><i style="background:${s.chip.color}"></i>${esc(s.chip.name)}</span>`).join('')
-    + (state.sol ? `<span style="color:var(--muted)"><i style="background:repeating-linear-gradient(90deg,var(--muted) 0 4px,transparent 4px 7px)"></i>speed of light</span>` : '');
-
   const svg = document.getElementById('plot');
-  svg.innerHTML = '';
   const W = svg.clientWidth || 800, H = Math.round(Math.max(340, Math.min(560, window.innerHeight * 0.62)));
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('height', H);
   const m = { l: 56, r: 12, t: 8, b: 40 };
-  const pw = W - m.l - m.r, ph = H - m.t - m.b;
-
   const all = vis.flatMap(s => s.pts.concat(s.sol).filter(Boolean));
-  // state.ymax (URL only) pins the Y range, e.g. so a recording doesn't rescale between steps.
+  // state.ymax (URL only) pins the Y range.
   const ymax = state.ymax || (all.length ? Math.max(...all.map(p => p.y)) * 1.06 : 1);
   let xs;
   if (conc) {
@@ -381,36 +381,25 @@ function draw() {
   const ymin = state.logy && all.length ? Math.max(ymax / 1e3, Math.min(...all.map(p => p.y)) * 0.8) : 0;
   const ys = scale(state.logy ? ymin : 0, ymax, H - m.b, m.t, state.logy);
 
-  const gridC = css('--grid'), muted = css('--muted'), fg = css('--fg'), line = css('--line');
-  const xt = conc ? logTicks(Math.min(xs.d0, xs.d1), Math.max(xs.d0, xs.d1)) : niceTicks(0, xs.d1, Math.max(4, Math.floor(pw / 90)));
-  const yt = state.logy ? logTicks(ymin, ymax) : niceTicks(0, ymax, Math.max(4, Math.floor(ph / 60)));
-  for (const v of yt) { const y = ys.f(v); el('line', { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: gridC }, svg); el('text', { x: m.l - 8, y: y + 4, 'text-anchor': 'end', fill: muted, 'font-size': 11 }, svg).textContent = fmt(v); }
-  for (const v of xt) { const x = xs.f(v); el('line', { x1: x, x2: x, y1: m.t, y2: H - m.b, stroke: gridC }, svg); el('text', { x, y: H - m.b + 16, 'text-anchor': 'middle', fill: muted, 'font-size': 11 }, svg).textContent = fmt(v); }
-  el('line', { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: line }, svg);
-  el('text', { x: m.l + pw / 2, y: H - 6, 'text-anchor': 'middle', fill: fg, 'font-size': 12 }, svg).textContent = xlab;
-  const cy = m.t + ph / 2;
-  el('text', { x: 14, y: cy, 'text-anchor': 'middle', fill: fg, 'font-size': 12, transform: `rotate(-90 14 ${cy})` }, svg).textContent = ylab;
+  const curves = {};
+  const ordered = vis.slice().reverse();     // first-listed chip drawn last, on top
+  for (const s of ordered) if (state.sol) curves[s.chip.id + ':sol'] = { color: s.chip.color, sol: true, data: s.sol.filter(p => p && p.y >= ys.d0).map(p => [p.x, p.y]) };
+  for (const s of ordered) curves[s.chip.id] = { color: s.chip.color, sol: false, data: s.pts.filter(p => p && p.y >= ys.d0).map(p => [p.x, p.y]) };
 
-  for (const s of vis.slice().reverse()) {   // first-listed chip drawn last, on top
-    if (state.sol) el('path', { d: path(s.sol.map(p => p && p.y >= ys.d0 && [p.x, p.y]), xs, ys), fill: 'none', stroke: s.chip.color, 'stroke-width': 1.25, 'stroke-dasharray': '4 3', opacity: 0.8 }, svg);
-    el('path', { d: path(s.pts.map(p => p && p.y >= ys.d0 && [p.x, p.y]), xs, ys), fill: 'none', stroke: s.chip.color, 'stroke-width': 2.25, 'stroke-linejoin': 'round' }, svg);
-  }
-
-  if (state.gains) drawGains(svg, vis, xs, ys);
-
-  const cursor = el('g', { visibility: 'hidden' }, svg);
-  el('line', { y1: m.t, y2: H - m.b, stroke: muted, 'stroke-dasharray': '3 3' }, cursor);
-  const dots = vis.map(s => el('circle', { r: 4, fill: s.chip.color, stroke: css('--bg'), 'stroke-width': 1.5 }, cursor));
-
-  geo = { xs, ys, m, W, H, grid, vis, cursor, dots };
-  if (pinnedX != null) showAt(pinnedX); else clearReadout();
+  return {
+    W, H, m, xs, ys, xmode: state.xmode, ylog: !!state.logy, grid, vis, curves,
+    order: state.chips.map(c => c.id),
+    xlab: conc ? 'Concurrent users per decode GPU (log, decreasing →)' : 'Interactivity (output tok/s per user)',
+    ylab: state.ymetric === 'perKW' ? 'Output tok/s per kW (all-in power)' : 'Output tok/s per GPU',
+    gains: state.gains ? gainMarkers(vis, xs, ys) : [],
+  };
 }
 
-// For each chip and the next one down the list (the previous generation), mark the throughput
-// multiple at three points: high throughput, middle, and low latency (left, center, right of the
-// range where both curves exist).
-function drawGains(svg, vis, xs, ys) {
-  const bg = css('--bg');
+// For each chip and the next one down the list (the previous generation), the throughput multiple
+// at three points: high throughput, middle, and low latency (left, center, right of the range
+// where both curves exist). Returned in data coordinates.
+function gainMarkers(vis, xs, ys) {
+  const out = [];
   for (let k = 0; k + 1 < vis.length; k++) {
     const nu = vis[k], old = vis[k + 1];
     const idx = nu.pts.map((p, i) => p && old.pts[i] && old.pts[i].y >= ys.d0 ? i : -1).filter(i => i >= 0);
@@ -421,17 +410,180 @@ function drawGains(svg, vis, xs, ys) {
       // In the concurrency view both pairs span the same x range, so stagger them to keep labels apart.
       const target = Math.min(hi, lo + f * (hi - lo) + (state.xmode === 'concurrency' ? k * 44 : 0));
       const i = idx.reduce((a, b) => Math.abs(px(b) - target) < Math.abs(px(a) - target) ? b : a);
-      const x = px(i), y0 = ys.f(old.pts[i].y), y1 = ys.f(nu.pts[i].y);
-      const g = el('g', {}, svg);
-      el('line', { x1: x, x2: x, y1: y0, y2: y1, stroke: nu.chip.color, 'stroke-width': 1.25 }, g);
-      for (const y of [y0, y1]) el('line', { x1: x - 3, x2: x + 3, y1: y, y2: y, stroke: nu.chip.color, 'stroke-width': 1.25 }, g);
-      const small = Math.abs(y0 - y1) < 22; // gap too thin to hold the label: put it above the top end
-      const t = el('text', { x: small ? x : x + 6, y: small ? y1 - 7 : (y0 + y1) / 2 + 4, 'text-anchor': small ? 'middle' : 'start', fill: nu.chip.color, 'font-size': 12, 'font-weight': 600,
-        stroke: bg, 'stroke-width': 3, 'paint-order': 'stroke' }, g);
-      t.textContent = (nu.pts[i].y / old.pts[i].y).toFixed(1) + '×';
+      out.push({ x: nu.pts[i].x, y0: old.pts[i].y, y1: nu.pts[i].y, color: nu.chip.color, label: (nu.pts[i].y / old.pts[i].y).toFixed(1) + '×' });
     }
   }
+  return out;
 }
+
+// Interpolate two scales of the same type (pixel range from b).
+function tweenScale(a, b, e) {
+  if (a.log !== b.log) return b;
+  const t = a.log ? Math.log : (v => v), it = a.log ? Math.exp : (v => v);
+  return rescale(scale(it(lerp(t(a.d0), t(b.d0), e)), it(lerp(t(a.d1), t(b.d1), e)), 0, 1, a.log), b);
+}
+function rescale(s, ref) { // map s's domain onto ref's pixel range
+  const p0 = ref.f(ref.d0), p1 = ref.f(ref.d1);
+  return scale(s.d0, s.d1, p0, p1, s.log);
+}
+
+function resample(pts, n) {
+  if (!pts.length) return null;
+  if (pts.length === 1) return Array.from({ length: n }, () => pts[0]);
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const L = cum[cum.length - 1] || 1, out = [];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const s = L * k / (n - 1);
+    while (j < pts.length - 2 && cum[j + 1] < s) j++;
+    const f = (s - cum[j]) / ((cum[j + 1] - cum[j]) || 1);
+    out.push([lerp(pts[j][0], pts[j + 1][0], f), lerp(pts[j][1], pts[j + 1][1], f)]);
+  }
+  return out;
+}
+// Concurrency curves run right-to-left in data order; order every curve high-throughput end first.
+function screenPts(view, key, xs, ys) {
+  const c = view.curves[key];
+  if (!c || !c.data.length) return null;
+  let pts = c.data.map(p => [xs.f(p[0]), ys.f(p[1])]);
+  if (pts.length > 1 && pts[0][1] > pts[pts.length - 1][1]) pts = pts.slice().reverse();
+  return resample(pts, 240);
+}
+// Where a curve that appears (or disappears) grows from (or shrinks into).
+function partnerKey(view, key, other) {
+  if (key.endsWith(':sol')) return key.slice(0, -4) in other.curves ? key.slice(0, -4) : null;
+  const order = view.order, i = order.indexOf(key);
+  for (let d = 1; d < order.length; d++) for (const j of [i + d, i - d]) if (order[j] && order[j] in other.curves) return order[j];
+  return null;
+}
+
+function axesSVG(svg, v, xs, ys, xop, yop, drawX, drawY) {
+  const gridC = css('--grid'), muted = css('--muted'), fg = css('--fg');
+  const pw = v.W - v.m.l - v.m.r, ph = v.H - v.m.t - v.m.b;
+  if (drawY && yop > 0.001) {
+    const g = el('g', { opacity: yop }, svg);
+    const lo = Math.min(ys.d0, ys.d1), hi = Math.max(ys.d0, ys.d1);
+    for (const val of ys.log ? logTicks(lo, hi) : niceTicks(lo, hi, Math.max(4, Math.floor(ph / 60)))) {
+      const y = ys.f(val);
+      el('line', { x1: v.m.l, x2: v.W - v.m.r, y1: y, y2: y, stroke: gridC }, g);
+      el('text', { x: v.m.l - 8, y: y + 4, 'text-anchor': 'end', fill: muted, 'font-size': 11 }, g).textContent = fmt(val);
+    }
+    const cy = v.m.t + ph / 2;
+    el('text', { x: 14, y: cy, 'text-anchor': 'middle', fill: fg, 'font-size': 12, transform: `rotate(-90 14 ${cy})` }, g).textContent = v.ylab;
+  }
+  if (drawX && xop > 0.001) {
+    const g = el('g', { opacity: xop }, svg);
+    const lo = Math.min(xs.d0, xs.d1), hi = Math.max(xs.d0, xs.d1);
+    for (const val of xs.log ? logTicks(lo, hi) : niceTicks(lo, hi, Math.max(4, Math.floor(pw / 90)))) {
+      const x = xs.f(val);
+      el('line', { x1: x, x2: x, y1: v.m.t, y2: v.H - v.m.b, stroke: gridC }, g);
+      el('text', { x, y: v.H - v.m.b + 16, 'text-anchor': 'middle', fill: muted, 'font-size': 11 }, g).textContent = fmt(val);
+    }
+    el('text', { x: v.m.l + pw / 2, y: v.H - 6, 'text-anchor': 'middle', fill: fg, 'font-size': 12 }, g).textContent = v.xlab;
+  }
+}
+
+function gainsSVG(svg, markers, xs, ys, op) {
+  if (op <= 0.001) return;
+  const bg = css('--bg'), g = el('g', { opacity: op }, svg);
+  for (const mk of markers) {
+    const x = xs.f(mk.x), y0 = ys.f(mk.y0), y1 = ys.f(mk.y1);
+    el('line', { x1: x, x2: x, y1: y0, y2: y1, stroke: mk.color, 'stroke-width': 1.25 }, g);
+    for (const y of [y0, y1]) el('line', { x1: x - 3, x2: x + 3, y1: y, y2: y, stroke: mk.color, 'stroke-width': 1.25 }, g);
+    const small = Math.abs(y0 - y1) < 22; // gap too thin to hold the label: put it above the top end
+    el('text', { x: small ? x : x + 6, y: small ? y1 - 7 : (y0 + y1) / 2 + 4, 'text-anchor': small ? 'middle' : 'start', fill: mk.color, 'font-size': 12, 'font-weight': 600,
+      stroke: bg, 'stroke-width': 3, 'paint-order': 'stroke' }, g).textContent = mk.label;
+  }
+}
+
+// Paint the transition from view A to view B at eased progress e (A = null: static B).
+function paint(A, B, e) {
+  const svg = document.getElementById('plot');
+  svg.innerHTML = '';
+  svg.setAttribute('viewBox', `0 0 ${B.W} ${B.H}`); svg.setAttribute('height', B.H);
+  if (!A) { A = B; e = 1; }
+  const sameX = A.xmode === B.xmode && A.xs.log === B.xs.log;
+  const sameY = A.ylog === B.ylog;
+  const xsT = sameX ? tweenScale(A.xs, B.xs, e) : null, ysT = sameY ? tweenScale(A.ys, B.ys, e) : null;
+  const axA = { xs: xsT || rescale(A.xs, B.xs), ys: ysT || rescale(A.ys, B.ys) };
+  const axB = { xs: xsT || B.xs, ys: ysT || B.ys };
+
+  // axes: tween in place, or cross-fade old → new
+  if (sameX && sameY) axesSVG(svg, Object.assign({}, B, { ylab: e < 0.5 ? A.ylab : B.ylab }), axB.xs, axB.ys, 1, 1, true, true);
+  else {
+    // old axis fades out over the first half, new one fades in over the second, so labels never overlap
+    const out = Math.max(0, 1 - 2 * e), inn = Math.max(0, 2 * e - 1);
+    axesSVG(svg, A, axA.xs, axA.ys, out, out, !sameX, !sameY);
+    axesSVG(svg, B, axB.xs, axB.ys, sameX ? 1 : inn, sameY ? 1 : inn, true, true);
+  }
+  const line = css('--line');
+  el('line', { x1: B.m.l, x2: B.W - B.m.r, y1: B.H - B.m.b, y2: B.H - B.m.b, stroke: line }, svg);
+
+  // curves
+  const clip = el('clipPath', { id: 'plotclip' }, el('defs', {}, svg));
+  el('rect', { x: B.m.l, y: 0, width: B.W - B.m.l - B.m.r + 4, height: B.H - B.m.b + 2 }, clip);
+  const g = el('g', { 'clip-path': 'url(#plotclip)' }, svg);
+  const keys = [...new Set(Object.keys(A.curves).filter(k => !(k in B.curves)).concat(Object.keys(B.curves)))];
+  // dashed lines first, then solid; the first-listed chip is drawn last (on top)
+  const weight = k => (k.endsWith(':sol') ? 0 : 1000) - B.order.indexOf(k.replace(':sol', ''));
+  keys.sort((a, b) => weight(a) - weight(b));
+  for (const k of keys) {
+    const inA = k in A.curves, inB = k in B.curves;
+    let from = inA ? screenPts(A, k, axA.xs, axA.ys) : null, to = inB ? screenPts(B, k, axB.xs, axB.ys) : null;
+    if (!from && to) { const pk = partnerKey(B, k, A); from = pk ? screenPts(A, pk, axA.xs, axA.ys) : to.map(p => [p[0], B.H - B.m.b]); }
+    if (!to && from) { const pk = partnerKey(A, k, B); to = pk ? screenPts(B, pk, axB.xs, axB.ys) : from.map(p => [p[0], B.H - B.m.b]); }
+    if (!from || !to) continue;
+    const pts = e >= 1 ? to : e <= 0 ? from : to.map((p, i) => [lerp(from[i][0], p[0], e), lerp(from[i][1], p[1], e)]);
+    const c = (inB ? B : A).curves[k];
+    const op = (inA && inB) ? 1 : inB ? Math.min(1, e * 2.5) : Math.max(0, 1 - e * 2.5);
+    if (op <= 0.001) continue;
+    el('path', { d: 'M' + pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('L'), fill: 'none', stroke: c.color,
+      'stroke-width': c.sol ? 1.25 : 2.25, 'stroke-dasharray': c.sol ? '4 3' : '', opacity: (c.sol ? 0.8 : 1) * op, 'stroke-linejoin': 'round' }, g);
+  }
+
+  // gain markers fade out over the first quarter of the morph and back in over the last quarter
+  if (A === B) gainsSVG(svg, B.gains, B.xs, B.ys, 1);
+  else { gainsSVG(svg, A.gains, axA.xs, axA.ys, Math.max(0, 1 - e / 0.25)); gainsSVG(svg, B.gains, axB.xs, axB.ys, Math.max(0, (e - 0.75) / 0.25)); }
+  return svg;
+}
+
+function finishView(v) {
+  const svg = paint(null, v, 1), muted = css('--muted');
+  const cursor = el('g', { visibility: 'hidden' }, svg);
+  el('line', { y1: v.m.t, y2: v.H - v.m.b, stroke: muted, 'stroke-dasharray': '3 3' }, cursor);
+  const dots = v.vis.map(s => el('circle', { r: 4, fill: s.chip.color, stroke: css('--bg'), 'stroke-width': 1.5 }, cursor));
+  geo = { xs: v.xs, ys: v.ys, m: v.m, W: v.W, H: v.H, grid: v.grid, vis: v.vis, cursor, dots };
+  if (pinnedX != null) showAt(pinnedX); else clearReadout();
+}
+
+function tick() {
+  if (!anim) return;
+  const u = Math.min(1, Math.max(0, (now() - anim.start) / ANIM_MS));
+  if (u >= 1) { const v = anim.to; anim = null; finishView(v); return; }
+  paint(anim.from, anim.to, ease(u));
+  if (manualClock == null) requestAnimationFrame(tick);
+}
+
+function draw(opts) {
+  const v = buildView();
+  document.getElementById('legend').innerHTML = v.vis.map(s => `<span><i style="background:${s.chip.color}"></i>${esc(s.chip.name)}</span>`).join('')
+    + (state.sol ? `<span style="color:var(--muted)"><i style="background:repeating-linear-gradient(90deg,var(--muted) 0 4px,transparent 4px 7px)"></i>speed of light</span>` : '');
+  const from = lastView;
+  lastView = v;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!from || (opts && opts.instant) || reduce) { anim = null; finishView(v); return; }
+  geo = null; clearReadout();
+  anim = { from, to: v, start: now() };
+  tick();
+}
+
+// Hooks for tools/record: drive the animation clock by hand.
+window.__chipference = {
+  setClock(ms) { manualClock = ms; tick(); },
+  setDuration(ms) { ANIM_MS = ms; },
+  animating: () => !!anim,
+};
 
 function clearReadout() { document.getElementById('read').innerHTML = ''; document.getElementById('hint').style.display = ''; document.getElementById('keys').style.display = 'none'; }
 function nearestIdx(x) {
@@ -471,10 +623,10 @@ function showAt(x) {
   const toX = e => { const r = svg.getBoundingClientRect(); const px = (e.clientX - r.left) * (geo.W / r.width); return px < geo.m.l || px > geo.W - geo.m.r ? null : geo.xs.inv(px); };
   svg.addEventListener('mousemove', e => { if (pinnedX != null || !geo) return; const x = toX(e); if (x != null) showAt(x); });
   svg.addEventListener('mouseleave', () => { if (pinnedX == null && geo) { geo.cursor.setAttribute('visibility', 'hidden'); clearReadout(); } });
-  svg.addEventListener('click', e => { const x = toX(e); if (x == null) return; pinnedX = pinnedX != null ? null : x; showAt(x); });
+  svg.addEventListener('click', e => { if (!geo) return; const x = toX(e); if (x == null) return; pinnedX = pinnedX != null ? null : x; showAt(x); });
 })();
-window.addEventListener('resize', () => draw());
-if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+window.addEventListener('resize', () => draw({ instant: true }));
+if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw({ instant: true }));
 
 renderControls();
 renderAssumptions();

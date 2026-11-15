@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chipference recording frame</title>
+<style>
+  /* A generic browser window around the live page, for the demo video. 1440×810 CSS px. */
+  html, body { margin: 0; width: 1440px; height: 810px; overflow: hidden; }
+  body { background: linear-gradient(160deg, #e9ecf1, #d9dee6); font: 13px -apple-system, system-ui, sans-serif; }
+  .win { position: absolute; left: 28px; top: 22px; width: 1384px; height: 766px; border-radius: 10px; overflow: hidden;
+         background: #fff; box-shadow: 0 18px 50px rgba(20, 30, 50, .22), 0 0 0 1px rgba(0, 0, 0, .08); }
+  .bar { height: 40px; background: #f1f2f4; border-bottom: 1px solid #e1e3e6; display: flex; align-items: center; gap: 14px; padding: 0 14px; }
+  .dots { display: flex; gap: 7px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; background: #d4d6da; display: block; }
+  .nav { color: #9aa0a6; font-size: 15px; letter-spacing: 6px; }
+  .url { flex: 1; height: 26px; border-radius: 13px; background: #fff; border: 1px solid #e1e3e6; display: flex; align-items: center; gap: 7px; padding: 0 12px; color: #3c4043; font-size: 13px; }
+  .url svg { flex: none; }
+  .url b { font-weight: 400; color: #80868b; }
+  iframe { display: block; width: 1384px; height: 726px; border: 0; }
+  #cursor { position: absolute; left: 0; top: 0; width: 22px; height: 22px; pointer-events: none; transform-origin: 3px 2px; z-index: 5; }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="bar">
+    <div class="dots"><i></i><i></i><i></i></div>
+    <div class="nav">‹ ›</div>
+    <div class="url">
+      <svg width="11" height="13" viewBox="0 0 11 13"><rect x="1" y="5.5" width="9" height="7" rx="1.5" fill="#80868b"/><path d="M3 5.5V4a2.5 2.5 0 0 1 5 0v1.5" stroke="#80868b" stroke-width="1.4" fill="none"/></svg>
+      aryatsc.github.io<b>/chipference</b>
+    </div>
+  </div>
+  <iframe id="app" src="../index.html"></iframe>
+</div>
+<svg id="cursor" viewBox="0 0 22 22"><path d="M3 2 L3 18 L7.2 14.2 L10 20.5 L12.8 19.3 L10.1 13.2 L15.8 13.2 Z" fill="#111" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>
+<script>
+'use strict';
+// Scripted demo, driven frame by frame by tools/record.py via window.__frame(seconds).
+// Each step moves the cursor to a real control in the live page and clicks it at time t.
+const STEPS = [
+  { t: 2.4, sel: '#chips .chip:nth-child(1) [data-act=vis]' },     // show LebronChip
+  { t: 6.4, sel: '#xmode button[data-v=interactivity]' },          // same-interactivity view
+  { t: 10.4, sel: '#sol' },                                          // speed of light
+];
+const MOVE = 0.75, ANIM_MS = 1100;
+const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+let app, doc, api, start = { x: 900, y: 400 }, done = 0;
+
+function target(sel) {
+  const r = doc.querySelector(sel).getBoundingClientRect(), f = document.getElementById('app').getBoundingClientRect();
+  return { x: f.left + r.left + r.width / 2, y: f.top + r.top + r.height / 2 };
+}
+
+// Put the page in the opening state without animating: concurrency X, per-kW Y, LebronChip hidden.
+function setup() {
+  api.setClock(-1e6);
+  api.setDuration(ANIM_MS);
+  doc.querySelector('#xmode button[data-v=concurrency]').click();
+  doc.querySelector('#ymetric button[data-v=perKW]').click();
+  doc.querySelector('#chips .chip:nth-child(1) [data-act=vis]').click();
+  api.setClock(-5e5);
+  // resolve cursor waypoints now that the panel is laid out (the chip row is rebuilt on click,
+  // but keeps its position)
+  let prev = start;
+  for (const s of STEPS) { s.from = prev; s.to = target(s.sel); prev = s.to; }
+  window.__ready = true;
+}
+
+window.__frame = function (T) {
+  // clicks due by now
+  while (done < STEPS.length && STEPS[done].t <= T) { doc.querySelector(STEPS[done].sel).click(); done++; }
+  api.setClock(T * 1000);
+  // cursor: glide to the next control just before its click, then a short press
+  let pos = STEPS.length ? STEPS[STEPS.length - 1].to : start, press = 1;
+  for (const s of STEPS) {
+    if (T < s.t - MOVE) { pos = s.from; break; }
+    if (T < s.t) { const u = ease((T - (s.t - MOVE)) / MOVE); pos = { x: s.from.x + (s.to.x - s.from.x) * u, y: s.from.y + (s.to.y - s.from.y) * u }; break; }
+    if (T < s.t + 0.18) { pos = s.to; press = 0.82; break; }
+    pos = s.to;
+  }
+  document.getElementById('cursor').style.transform = `translate(${pos.x - 3}px, ${pos.y - 2}px) scale(${press})`;
+  return true;
+};
+
+document.getElementById('app').addEventListener('load', () => {
+  app = document.getElementById('app').contentWindow; doc = app.document; api = app.__chipference;
+  setup();
+});
+</script>
+</body>
+</html>

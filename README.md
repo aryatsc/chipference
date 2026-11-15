@@ -79,7 +79,7 @@ MoE and expert parallelism, speculative decoding, prefill/decode interference (i
 
 ## Video
 
-`media/demo.mp4` is rendered by [`tools/record.html`](tools/record.html), which morphs the curves between states frame by frame. To re-render it, run `python3 tools/record_server.py /tmp/frames`, open `http://localhost:8766/tools/record.html`, then encode the frames with ffmpeg (the command is in `tools/record_server.py`).
+`media/demo.mp4` is a recording of the real page. [`tools/record.py`](tools/record.py) opens [`tools/frame.html`](tools/frame.html), which puts the page in a browser-window frame and clicks the real controls. It then steps the page's animation clock one frame at a time, screenshots each frame with headless Chrome, and encodes the result with ffmpeg. To re-render after changing anything, run `python3 tools/record.py` (needs Google Chrome and ffmpeg).
 
 ## Run locally
 
