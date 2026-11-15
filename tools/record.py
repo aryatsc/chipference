@@ -24,7 +24,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHROME = os.environ.get("CHROME", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-FPS, SECONDS = 30, 14.8
+FPS, SECONDS = 30, 8.0
 W, H, SCALE = 1440, 810, 4 / 3        # CSS px and device scale -> 1920x1080 output
 HTTP_PORT, CDP_PORT = 8767, 9333
 

@@ -40,11 +40,11 @@
 // Scripted demo, driven frame by frame by tools/record.py via window.__frame(seconds).
 // Each step moves the cursor to a real control in the live page and clicks it at time t.
 const STEPS = [
-  { t: 2.4, sel: '#chips .chip:nth-child(1) [data-act=vis]' },     // show LebronChip
-  { t: 6.4, sel: '#xmode button[data-v=interactivity]' },          // same-interactivity view
-  { t: 10.4, sel: '#sol' },                                          // speed of light
+  { t: 1.4, sel: '#chips .chip:nth-child(1) [data-act=vis]' },     // show LebronChip
+  { t: 3.6, sel: '#xmode button[data-v=interactivity]' },          // same-interactivity view
+  { t: 5.8, sel: '#sol' },                                          // speed of light
 ];
-const MOVE = 0.75, ANIM_MS = 1100;
+const MOVE = 0.75, ANIM_MS = 950;
 const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 let app, doc, api, start = { x: 900, y: 400 }, done = 0;
 
