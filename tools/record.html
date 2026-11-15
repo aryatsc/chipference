@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chipference video recorder</title>
+<style>
+  body { margin: 0; background: #fff; font: 13px system-ui, sans-serif; }
+  #status { position: fixed; top: 8px; left: 8px; background: #fff; padding: 4px 8px; border: 1px solid #ddd; }
+  #stage { width: 960px; }
+  #stage svg { width: 100%; height: auto; display: block; }
+</style>
+</head>
+<body>
+<div id="status">loading…</div>
+<div id="stage"></div>
+<script src="../model.js"></script>
+<script>
+'use strict';
+// Renders the demo video frame by frame. Lines morph between states instead of cross-fading.
+// Usage: serve the repo with tools/record_server.py, open /tools/record.html, frames are POSTed
+// to the server as PNGs. ?preview=<seconds> renders a single frame on screen instead.
+
+const W = 1920, H = 1080, FPS = 30;
+const FONT = 'Helvetica Neue, Helvetica, Arial, sans-serif';
+const C = { fg: '#1a1a1a', muted: '#6b6b6b', grid: '#ececec', axis: '#d0d0d0', bg: '#ffffff' };
+const M = { l: 130, r: 60, t: 140, b: 120 };
+
+const SPECS = {
+  gb300: { name: 'GB300 NVL72', color: '#2f9e44', fp4: 15, fp8: 5, hbmGB: 288, hbmTBs: 8, nvlTBs: 1.8, domain: 72, nicGbps: 800, watts: 1900 },
+  rubin: { name: 'Vera Rubin NVL72', color: '#1c7ed6', fp4: 35, fp8: 17.5, hbmGB: 288, hbmTBs: 19.2, nvlTBs: 3.0, domain: 72, nicGbps: 1600, watts: 2640 },
+};
+SPECS.lebron = { name: 'LebronChip', color: '#7b2fbe', domain: 72 };
+for (const k of ['fp4', 'fp8', 'hbmGB', 'hbmTBs', 'nvlTBs', 'nicGbps', 'watts'])
+  SPECS.lebron[k] = +(SPECS.rubin[k] * SPECS.rubin[k] / SPECS.gb300[k]).toPrecision(4);
+const ORDER = ['lebron', 'rubin', 'gb300'];          // newest first (legend, gains pairs)
+const WORK = { isl: 8192, osl: 1024, includePrefill: true };
+const STRAT = { pp: true, dpAttn: true };
+const METRIC = 'perKW';
+
+// ------------------------------------------------------------------ frontier data (same rules as index.html)
+function frontierFor(id, xmode, sol) {
+  const chip = SPECS[id];
+  let grid;
+  if (xmode === 'interactivity') {
+    const xmax = Model.maxInteractivity(chip, WORK, STRAT, sol);
+    grid = Array.from({ length: 240 }, (_, i) => xmax * 1.01 * (i + 1) / 240);
+  } else {
+    grid = Array.from({ length: 200 }, (_, i) => 0.01 * Math.pow(40000, i / 199));
+  }
+  let pts = Model.frontier(chip, WORK, STRAT, xmode, grid, METRIC, sol);
+  if (xmode === 'concurrency') { let best = -Infinity; pts = pts.map(p => (!p || p.y <= best) ? null : (best = p.y, p)); }
+  else { let on = false; pts = pts.map(p => { if (!on && p && p.interactivity <= p.x * 1.02) on = true; return on ? p : null; }); }
+  pts = pts.filter(Boolean).map(p => ({ x: p.x, y: p.y }));
+  if (xmode === 'concurrency') pts.reverse();       // order every curve high-throughput end → low-latency end
+  return pts;
+}
+
+// Keyframes. Each lists visible chips, X mode, axis domains and whether speed of light is on.
+function keyframe(chips, xmode, sol, ymax) {
+  const curves = {};
+  for (const id of chips) { curves[id] = frontierFor(id, xmode, false); if (sol) curves[id + ':sol'] = frontierFor(id, xmode, true); }
+  let xd;
+  if (xmode === 'concurrency') xd = [50, 0.012];      // reversed log axis
+  else xd = [0, Math.max(...Object.values(curves).flat().map(p => p.x)) * 1.02];
+  return { chips, xmode, sol, curves, xd, ymax };
+}
+
+const K = {};
+function buildKeyframes() {
+  K.a = keyframe(['rubin', 'gb300'], 'concurrency', false, 205);
+  K.b = keyframe(['lebron', 'rubin', 'gb300'], 'concurrency', false, 205);
+  K.c = keyframe(['lebron', 'rubin', 'gb300'], 'interactivity', false, 205);
+  K.d = keyframe(['lebron', 'rubin', 'gb300'], 'interactivity', true, 290);
+}
+
+// Timeline in seconds: holds and morphs.
+const TIMELINE = [
+  { hold: 'a', dur: 2.6 },
+  { from: 'a', to: 'b', dur: 1.4 },
+  { hold: 'b', dur: 2.4 },
+  { from: 'b', to: 'c', dur: 1.8 },
+  { hold: 'c', dur: 2.4 },
+  { from: 'c', to: 'd', dur: 1.6 },
+  { hold: 'd', dur: 3.3 },
+];
+const TOTAL = TIMELINE.reduce((s, e) => s + e.dur, 0);
+
+// ------------------------------------------------------------------ geometry helpers
+const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+function axes(kf, xd, ymax) {
+  const log = kf.xmode === 'concurrency';
+  const px0 = M.l, px1 = W - M.r, py0 = H - M.b, py1 = M.t;
+  const tx = log ? Math.log : (v => v);
+  const fx = v => px0 + (tx(v) - tx(xd[0])) / (tx(xd[1]) - tx(xd[0])) * (px1 - px0);
+  const fy = v => py0 + v / ymax * (py1 - py0);
+  return { log, xd, ymax, fx, fy };
+}
+// Resample a polyline (screen space) to N points evenly spaced by arc length.
+function resample(pts, N) {
+  if (pts.length < 2) return Array.from({ length: N }, () => pts[0] || [0, 0]);
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const L = cum[cum.length - 1], out = [];
+  let j = 0;
+  for (let k = 0; k < N; k++) {
+    const s = L * k / (N - 1);
+    while (j < pts.length - 2 && cum[j + 1] < s) j++;
+    const f = (s - cum[j]) / ((cum[j + 1] - cum[j]) || 1);
+    out.push([lerp(pts[j][0], pts[j + 1][0], f), lerp(pts[j][1], pts[j + 1][1], f)]);
+  }
+  return out;
+}
+const N = 300;
+function screenCurves(kf, ax) {
+  const out = {};
+  for (const id in kf.curves) out[id] = resample(kf.curves[id].map(p => [ax.fx(p.x), ax.fy(Math.min(p.y, ax.ymax * 1.2))]), N);
+  return out;
+}
+// Where a curve that doesn't exist yet grows from.
+const SOURCE = { lebron: 'rubin' };
+const sourceOf = id => id.endsWith(':sol') ? id.slice(0, -4) : SOURCE[id];
+
+// ------------------------------------------------------------------ SVG rendering
+function niceTicks(lo, hi, n) {
+  const span = hi - lo, mag = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const step = [1, 2, 2.5, 5, 10].map(s => s * mag).find(s => span / s <= n);
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toPrecision(10));
+  return out;
+}
+function logTicks(lo, hi) { const out = []; for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) for (const m of [1, 2, 5]) { const v = m * 10 ** e; if (v >= lo * 0.999 && v <= hi * 1.001) out.push(v); } return out; }
+const fmt = v => v >= 1 ? String(+v.toFixed(2)) : String(+v.toPrecision(2));
+const path = pts => pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join('');
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+function xAxisSVG(ax, opacity) {
+  if (opacity <= 0.001) return '';
+  let s = `<g opacity="${opacity.toFixed(3)}">`;
+  const lo = Math.min(ax.xd[0], ax.xd[1]), hi = Math.max(ax.xd[0], ax.xd[1]);
+  const ticks = ax.log ? logTicks(lo, hi) : niceTicks(lo, hi, 9);
+  for (const v of ticks) {
+    const x = ax.fx(v);
+    s += `<line x1="${x}" x2="${x}" y1="${M.t}" y2="${H - M.b}" stroke="${C.grid}" stroke-width="1.5"/>`;
+    s += `<text x="${x}" y="${H - M.b + 38}" text-anchor="middle" font-size="24" fill="${C.muted}">${fmt(v)}</text>`;
+  }
+  const label = ax.log ? 'Concurrent users per decode GPU  (log scale, decreasing →)' : 'Interactivity  (output tok/s per user)';
+  s += `<text x="${(M.l + W - M.r) / 2}" y="${H - 28}" text-anchor="middle" font-size="28" fill="${C.fg}">${label}</text>`;
+  return s + '</g>';
+}
+function yAxisSVG(ax) {
+  let s = '';
+  for (const v of niceTicks(0, ax.ymax, 6)) {
+    const y = ax.fy(v);
+    s += `<line x1="${M.l}" x2="${W - M.r}" y1="${y}" y2="${y}" stroke="${C.grid}" stroke-width="1.5"/>`;
+    s += `<text x="${M.l - 16}" y="${y + 8}" text-anchor="end" font-size="24" fill="${C.muted}">${fmt(v)}</text>`;
+  }
+  const cy = (M.t + H - M.b) / 2;
+  s += `<text x="40" y="${cy}" text-anchor="middle" font-size="28" fill="${C.fg}" transform="rotate(-90 40 ${cy})">Output tok/s per kW  (all-in power)</text>`;
+  s += `<line x1="${M.l}" x2="${W - M.r}" y1="${H - M.b}" y2="${H - M.b}" stroke="${C.axis}" stroke-width="2"/>`;
+  return s;
+}
+// Throughput multiple vs the next chip down at three points (same rule as the page).
+function gainsSVG(kf, curvesScreen, ax, opacity) {
+  if (opacity <= 0.001) return '';
+  let s = `<g opacity="${opacity.toFixed(3)}">`;
+  const vis = ORDER.filter(id => kf.chips.includes(id));
+  for (let k = 0; k + 1 < vis.length; k++) {
+    const nu = kf.curves[vis[k]], old = kf.curves[vis[k + 1]];
+    const at = (curve, x) => { // y on a curve at data x (curves are monotone in x)
+      for (let i = 1; i < curve.length; i++) {
+        const a = curve[i - 1], b = curve[i];
+        if ((a.x - x) * (b.x - x) <= 0) { const f = (x - a.x) / ((b.x - a.x) || 1); return lerp(a.y, b.y, f); }
+      }
+      return null;
+    };
+    const px = p => ax.fx(p.x);
+    const shared = nu.filter(p => at(old, p.x) != null);
+    if (shared.length < 3) continue;
+    const lo = Math.min(...shared.map(px)), hi = Math.max(...shared.map(px));
+    const color = SPECS[vis[k]].color;
+    for (const f of [0.1, 0.5, 0.85]) {
+      const target = Math.min(hi, lo + f * (hi - lo) + (kf.xmode === 'concurrency' ? k * 80 : 0));
+      const p = shared.reduce((a, b) => Math.abs(px(b) - target) < Math.abs(px(a) - target) ? b : a);
+      const yo = at(old, p.x), x = px(p), y0 = ax.fy(yo), y1 = ax.fy(p.y);
+      const small = Math.abs(y0 - y1) < 40;
+      s += `<line x1="${x}" x2="${x}" y1="${y0}" y2="${y1}" stroke="${color}" stroke-width="2.5"/>`;
+      for (const y of [y0, y1]) s += `<line x1="${x - 7}" x2="${x + 7}" y1="${y}" y2="${y}" stroke="${color}" stroke-width="2.5"/>`;
+      s += `<text x="${small ? x : x + 12}" y="${small ? y1 - 14 : (y0 + y1) / 2 + 9}" text-anchor="${small ? 'middle' : 'start'}" font-size="26" font-weight="700" fill="${color}" stroke="${C.bg}" stroke-width="6" paint-order="stroke">${(p.y / yo).toFixed(1)}×</text>`;
+    }
+  }
+  return s + '</g>';
+}
+function legendSVG(alpha) {
+  let s = '', x = M.l;
+  const items = ORDER.map(id => ({ label: SPECS[id].name, color: SPECS[id].color, a: alpha[id] }));
+  items.push({ label: 'speed of light', color: C.muted, a: alpha.sol, dash: true });
+  for (const it of items) {
+    if (it.a <= 0.001) continue;
+    s += `<g opacity="${it.a.toFixed(3)}"><line x1="${x}" x2="${x + 36}" y1="${M.t - 48}" y2="${M.t - 48}" stroke="${it.color}" stroke-width="5" ${it.dash ? 'stroke-dasharray="9 7"' : ''}/>`;
+    s += `<text x="${x + 48}" y="${M.t - 39}" font-size="26" fill="${C.fg}">${esc(it.label)}</text></g>`;
+    x += 48 + it.label.length * 14 + 50;
+  }
+  return s;
+}
+
+function frameSVG(t) {
+  // locate segment
+  let acc = 0, seg = TIMELINE[TIMELINE.length - 1], u = 1;
+  for (const e of TIMELINE) { if (t < acc + e.dur) { seg = e; u = (t - acc) / e.dur; break; } acc += e.dur; }
+
+  let body = '', gridX = '', gridY = '';
+  const alpha = { lebron: 0, rubin: 0, gb300: 0, sol: 0 };
+  const lines = [];   // {id, pts, opacity}
+  let gains = '';
+
+  if (seg.hold) {
+    const kf = K[seg.hold], ax = axes(kf, kf.xd, kf.ymax);
+    const sc = screenCurves(kf, ax);
+    for (const id in sc) lines.push({ id, pts: sc[id], op: 1 });
+    gridX = xAxisSVG(ax, 1); gridY = yAxisSVG(ax);
+    gains = gainsSVG(kf, sc, ax, 1);
+    for (const id of kf.chips) alpha[id] = 1; alpha.sol = kf.sol ? 1 : 0;
+  } else {
+    const A = K[seg.from], B = K[seg.to], e = ease(u);
+    const sameMode = A.xmode === B.xmode;
+    let axA, axB, axT;
+    if (sameMode) {
+      const xd = A.xmode === 'concurrency' ? A.xd : [0, lerp(A.xd[1], B.xd[1], e)];
+      axT = axes(B, xd, lerp(A.ymax, B.ymax, e)); axA = axB = axT;
+      gridX = xAxisSVG(axT, 1);
+    } else {
+      axA = axes(A, A.xd, A.ymax); axB = axes(B, B.xd, B.ymax); axT = axB;
+      gridX = xAxisSVG(axA, 1 - e) + xAxisSVG(axB, e);
+    }
+    gridY = yAxisSVG(axes(B, B.xd, lerp(A.ymax, B.ymax, e)));
+    const sa = screenCurves(A, axA), sb = screenCurves(B, axB);
+    for (const id in sb) {
+      const fromPts = sa[id] || sa[sourceOf(id)];
+      const born = !sa[id];
+      const pts = sb[id].map((p, i) => [lerp(fromPts[i][0], p[0], e), lerp(fromPts[i][1], p[1], e)]);
+      lines.push({ id, pts, op: born ? Math.min(1, e * 2.5) : 1 });
+    }
+    // gains markers: fade out over the first 25% of the morph, back in over the last 25%
+    const out = Math.max(0, 1 - u / 0.25), inn = Math.max(0, (u - 0.75) / 0.25);
+    gains = gainsSVG(A, sa, axA, out) + gainsSVG(B, sb, axB, inn);
+    for (const id of ORDER) alpha[id] = A.chips.includes(id) ? 1 : (B.chips.includes(id) ? Math.min(1, e * 2) : 0);
+    alpha.sol = A.sol ? 1 : (B.sol ? Math.min(1, e * 2) : 0);
+  }
+
+  // draw dashed (speed of light) first, then solid; newest chip on top
+  const drawOrder = id => (id.endsWith(':sol') ? 0 : 10) - ORDER.indexOf(id.replace(':sol', ''));
+  lines.sort((a, b) => drawOrder(a.id) - drawOrder(b.id));
+  for (const ln of lines) {
+    const id = ln.id.replace(':sol', ''), sol = ln.id.endsWith(':sol');
+    body += `<path d="${path(ln.pts)}" fill="none" stroke="${SPECS[id].color}" stroke-width="${sol ? 2.5 : 5}" ${sol ? 'stroke-dasharray="10 8"' : ''} stroke-linejoin="round" stroke-linecap="round" opacity="${(sol ? 0.85 : 1) * ln.op}"/>`;
+  }
+
+  const sub = `MegaLlama-3T (dense, 3T params) decode · 8k in / 1k out · NVFP4 · prefill GPUs counted`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="${FONT}">
+    <rect width="${W}" height="${H}" fill="${C.bg}"/>
+    <defs><clipPath id="plot"><rect x="${M.l}" y="${M.t - 10}" width="${W - M.l - M.r + 10}" height="${H - M.t - M.b + 10}"/></clipPath></defs>
+    <text x="${M.l}" y="44" font-size="22" fill="${C.muted}">${sub}</text>
+    ${legendSVG(alpha)}
+    ${gridY}${gridX}
+    <g clip-path="url(#plot)">${body}</g>
+    ${gains}
+  </svg>`;
+}
+
+// ------------------------------------------------------------------ output
+function svgToPngBlob(svg) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      cv.getContext('2d').drawImage(img, 0, 0);
+      cv.toBlob(resolve, 'image/png');
+    };
+    img.onerror = reject;
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
+
+async function main() {
+  const status = document.getElementById('status');
+  buildKeyframes();
+  const q = new URLSearchParams(location.search);
+  if (q.has('preview')) {
+    document.getElementById('stage').innerHTML = frameSVG(parseFloat(q.get('preview')) || 0);
+    status.textContent = `preview t=${q.get('preview')}s of ${TOTAL.toFixed(1)}s`;
+    return;
+  }
+  const n = Math.round(TOTAL * FPS);
+  for (let i = 0; i < n; i++) {
+    const svg = frameSVG(i / FPS);
+    const blob = await svgToPngBlob(svg);
+    await fetch(`/frame?i=${i}`, { method: 'POST', body: blob });
+    if (i % 15 === 0) { status.textContent = `frame ${i + 1}/${n}`; document.getElementById('stage').innerHTML = svg; }
+  }
+  await fetch('/done', { method: 'POST' });
+  status.textContent = `done: ${n} frames`;
+  window.__done = n;
+}
+main();
+</script>
+</body>
+</html>

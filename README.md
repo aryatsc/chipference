@@ -1,6 +1,6 @@
-# Inference Pareto Model
+# Chipference
 
-**Try it: https://aryatsc.github.io/inference-pareto/**
+**Try it: https://aryatsc.github.io/chipference/**
 
 A roofline model of LLM decode on GB300 NVL72, Vera Rubin NVL72, and a hypothetical next chip (LebronChip). For each chip it searches parallelism configs and plots the throughput–latency Pareto frontier.
 
@@ -76,6 +76,10 @@ Every spec is editable in the page, and you can add your own chips. The full sta
 ## What it doesn't model
 
 MoE and expert parallelism, speculative decoding, prefill/decode interference (it assumes disaggregated serving), TTFT, KV offload, and real-world software maturity. Every chip is assumed to get equally good kernels.
+
+## Video
+
+`media/demo.mp4` is rendered by [`tools/record.html`](tools/record.html), which morphs the curves between states frame by frame. To re-render it, run `python3 tools/record_server.py /tmp/frames`, open `http://localhost:8766/tools/record.html`, then encode the frames with ffmpeg (the command is in `tools/record_server.py`).
 
 ## Run locally
 
